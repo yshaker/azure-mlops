@@ -1,0 +1,89 @@
+# MLOps pipeline: data -> train (AML pipeline) -> register -> deploy -> smoke test
+# Same managed-identity OIDC login as the infra pipeline.
+name: mlops
+
+on:
+  push:
+    branches: [main]
+    paths: ["ml/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly retrain, Mondays 06:00 UTC
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: ${{ vars.WORKLOAD_RESOURCE_GROUP }}
+  WS: ${{ vars.AML_WORKSPACE }}
+  EP: ${{ vars.AML_ENDPOINT_NAME }}
+
+jobs:
+  train-register-deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (managed identity via OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Azure ML CLI
+        run: |
+          az extension add -n ml -y
+          az configure --defaults group=$RG workspace=$WS
+
+      # In a real system data already lands in the lake; here we generate it.
+      - name: Generate and register data asset
+        run: |
+          pip install pandas numpy
+          python ml/data/generate_churn_data.py --out ml/data/churn_raw.csv
+          az ml data create -f ml/jobs/data-asset.yml --version ${{ github.run_number }}
+
+      - name: Run training pipeline
+        id: train
+        run: |
+          RUN=$(az ml job create -f ml/jobs/train-pipeline.yml --query name -o tsv)
+          echo "run=$RUN" >> $GITHUB_OUTPUT
+          az ml job stream -n $RUN
+          STATUS=$(az ml job show -n $RUN --query status -o tsv)
+          echo "Pipeline status: $STATUS"
+          [ "$STATUS" = "Completed" ] || { echo "Training failed or quality gate not met"; exit 1; }
+
+      - name: Register model (with lineage back to the job)
+        id: register
+        run: |
+          VERSION=$(az ml model create \
+            --name churn-model \
+            --type mlflow_model \
+            --path azureml://jobs/${{ steps.train.outputs.run }}/outputs/model_output \
+            --tags git_sha=${{ github.sha }} pipeline_run=${{ steps.train.outputs.run }} \
+            --query version -o tsv)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Registered churn-model:$VERSION"
+
+      - name: Create endpoint if missing
+        run: |
+          az ml online-endpoint show -n $EP >/dev/null 2>&1 \
+            || az ml online-endpoint create -f ml/endpoints/endpoint.yml --name $EP
+
+      - name: Deploy (create or update the blue deployment)
+        run: |
+          MODEL="azureml:churn-model:${{ steps.register.outputs.version }}"
+          if az ml online-deployment show -n blue -e $EP >/dev/null 2>&1; then
+            az ml online-deployment update -f ml/endpoints/deployment.yml \
+              --endpoint-name $EP --set model=$MODEL
+          else
+            az ml online-deployment create -f ml/endpoints/deployment.yml \
+              --endpoint-name $EP --set model=$MODEL --all-traffic
+          fi
+
+      - name: Smoke test
+        run: |
+          az ml online-endpoint invoke -n $EP --request-file ml/endpoints/sample-request.json
+          echo "Scoring URI: $(az ml online-endpoint show -n $EP --query scoring_uri -o tsv)"

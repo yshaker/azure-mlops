@@ -1,0 +1,7 @@
+$schema: https://azuremlschemas.azureedge.net/latest/data.schema.json
+# Registers the raw CSV as a versioned data asset. Every training run records
+# which data version it used -> full lineage from prediction back to data.
+name: churn-raw
+type: uri_file
+path: ../data/churn_raw.csv
+description: Raw customer churn data (synthetic)

@@ -1,0 +1,62 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+# Azure ML pipeline:  raw data -> prep -> train (+quality gate) -> MLflow model
+# Submit with:  az ml job create -f ml/jobs/train-pipeline.yml
+type: pipeline
+display_name: churn-training
+experiment_name: churn-prediction
+description: Prepare data, train and compare models, gate on AUC
+
+settings:
+  default_compute: azureml:cpu-cluster
+  continue_on_step_failure: false
+
+inputs:
+  raw_data:
+    type: uri_file
+    path: azureml:churn-raw@latest
+  auc_threshold: 0.75
+
+outputs:
+  model_output:
+    type: mlflow_model
+
+jobs:
+  prep:
+    type: command
+    display_name: prep-data
+    code: ../src
+    command: >-
+      python prep.py
+      --raw ${{inputs.raw}}
+      --train ${{outputs.train}}
+      --test ${{outputs.test}}
+    environment:
+      image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
+      conda_file: ../environment/conda.yml
+    inputs:
+      raw: ${{parent.inputs.raw_data}}
+    outputs:
+      train:
+        type: uri_folder
+      test:
+        type: uri_folder
+
+  train:
+    type: command
+    display_name: train-and-gate
+    code: ../src
+    command: >-
+      python train.py
+      --train ${{inputs.train}}
+      --test ${{inputs.test}}
+      --model_output ${{outputs.model_output}}
+      --auc_threshold ${{inputs.auc_threshold}}
+    environment:
+      image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
+      conda_file: ../environment/conda.yml
+    inputs:
+      train: ${{parent.jobs.prep.outputs.train}}
+      test: ${{parent.jobs.prep.outputs.test}}
+      auc_threshold: ${{parent.inputs.auc_threshold}}
+    outputs:
+      model_output: ${{parent.outputs.model_output}}

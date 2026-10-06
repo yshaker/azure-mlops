@@ -1,0 +1,72 @@
+# Infrastructure pipeline — Terraform plan on PR, apply on merge to main.
+# Authenticates as the USER-ASSIGNED MANAGED IDENTITY created in bootstrap,
+# via OIDC federation. There is no client secret stored anywhere.
+name: infra
+
+on:
+  pull_request:
+    paths: ["infra/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # lets the job request a GitHub OIDC token
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_resource_group_name: ${{ vars.WORKLOAD_RESOURCE_GROUP }}
+  TF_VAR_apim_publisher_email: ${{ vars.APIM_PUBLISHER_EMAIL }}
+  TF_VAR_apim_sku: ${{ vars.APIM_SKU || 'Consumption_0' }}
+  TF_VAR_aml_endpoint_base_url: ${{ vars.AML_ENDPOINT_BASE_URL }}
+
+defaults:
+  run:
+    working-directory: infra
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Init
+        run: >
+          terraform init
+          -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}"
+      - run: terraform fmt -check -recursive
+      - run: terraform validate
+      - name: Plan
+        run: terraform plan -input=false -out=tfplan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: infra/tfplan
+
+  apply:
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: dev # add "required reviewers" here for a manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: infra
+      - name: Init
+        run: >
+          terraform init
+          -backend-config="resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}"
+          -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}"
+      - name: Apply the exact plan that was reviewed
+        run: terraform apply -input=false tfplan

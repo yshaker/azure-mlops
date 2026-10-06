@@ -1,0 +1,11 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+# Managed online endpoint = the stable HTTPS URL. Deployments (blue/green)
+# sit behind it and can be swapped without the URL changing.
+# The name is overridden at create time with --name (must be unique per region).
+name: churn-endpoint
+description: Real-time churn scoring
+# aad_token = callers must present an Entra ID token (e.g. APIM's managed
+# identity). No static keys to leak or rotate.
+auth_mode: aad_token
+identity:
+  type: system_assigned

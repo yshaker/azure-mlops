@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. Do not commit terraform.tfvars.
+subscription_id      = "00000000-0000-0000-0000-000000000000"
+resource_group_name  = "rg-churn-dev"
+apim_publisher_email = "you@example.com"
+apim_sku             = "Consumption_0" # fast for learning; Developer_1 for VNet
+
+# Phase 2: set after the endpoint is deployed, then terraform apply again
+# aml_endpoint_base_url = "https://churn-abc12.eastus2.inference.ml.azure.com"
